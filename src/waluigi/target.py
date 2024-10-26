@@ -15,8 +15,7 @@ class NoTarget(Bundle):
     def exists(self) -> bool:
         return False
 
-@bundleclass
-class Wrapped(Bundle):
+class Wrapped(object):
     def __init__(self):
         pass
 
