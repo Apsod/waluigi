@@ -11,7 +11,14 @@ from dataclasses import field
 
 
 
-def add_task(graph, task):
+def add_task(graph: Graph, task: Task):
+    """
+    add_task(graph, task) adds a task and all of its
+    dependencies to the graph, recursively.
+    Tasks that are already done are added as dependencies,
+    to tasks that depend on them, but their dependencies 
+    are not added.
+    """
     def inner(parent):
         for child in parent._requires():
             if not (child.done() or graph.has(child)):
@@ -23,6 +30,15 @@ def add_task(graph, task):
         graph.add(task)
 
 def mk_dag(*tasks):
+    """
+    tasks: [Task]
+
+    Construct the graph for the given tasks.
+    Returns a list in topological order of type
+    [(Task, TaskInfo)], where TaskInfo contains
+    dependents and dependencies of the task in 
+    question.
+    """
     graph = Graph()
     for task in tasks:
         add_task(graph, task)
@@ -32,6 +48,16 @@ def mk_dag(*tasks):
     return [(val, graph.get(val)) for val in sorted]
 
 async def run_dag(task_edges, **kwargs):
+    """
+    task_edges: [(Task, TaskInfo)]
+    kwargs: keyword arguments passed to the run_async methods of the tasks.
+
+    Schedules all tasks in the dag, ensuring that downstreams tasks await
+    upstreams tasks, and ensures that tasks with cleanup runs after dependent
+    tasks are finished.
+
+    Prints out task results on finish.
+    """
     runs = {}
     cleanups = {}
     done = 0
@@ -43,19 +69,22 @@ async def run_dag(task_edges, **kwargs):
             deps = [runs[l] for l in edges.left]
             runs[task] = asyncio.create_task(task._run_after(*deps, **kwargs))
 
-    for (task, edges) in reversed(task_edges):
+    for (task, edges) in task_edges:
         if isinstance(task, TaskWithCleanup):
             deps = [runs[r] for r in edges.right]
             if not task.done():
                 deps += [runs[task]]
             cleanups[task] = asyncio.create_task(task._cleanup_after(*deps, **kwargs))
     
-    logger.info('Scheduler completed, starting run')
+    logger.info('Tasks scheduled, starting run')
     results = await asyncio.gather(*runs.values(), *cleanups.values(), return_exceptions=True)
     run_results, clean_results = results[:len(runs.values())], results[len(runs.values()):]
     log_results(done, run_results, clean_results)
 
 def log_results(done, run_results, clean_results):
+    """
+    friendly logging of run results.
+    """
     runs = 0
     run_fails = []
     run_depfails = 0
