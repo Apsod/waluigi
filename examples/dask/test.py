@@ -1,8 +1,14 @@
-from dataclasses import field
+from dataclasses import field, dataclass
+from typing import Any
 import asyncio
 import logging
+from functools import wraps
+from contextlib import contextmanager
+import pathlib
 
 from dask.distributed import LocalCluster, Client
+import polars as pl
+import polars.datatypes as pld
 
 from waluigi.bundle import bundleclass
 from waluigi.task import Task, TaskWithCleanup, ExternalTask, MemoryTask
@@ -10,100 +16,116 @@ from waluigi.runner import mk_dag, run_dag
 from waluigi.target import *
 from waluigi.resources import Resources
 
-import polars as pl
-import pathlib
-
-root = pathlib.Path('/path/to/some/parquet/dir')
+root = pathlib.Path('data')
 
 def rooted(*branch):
     return LocalTarget(file=str(root.joinpath(*branch)))
 
 @bundleclass
-class Head(TaskWithCleanup):
+class DaskTask(Task):
+    async def run_async(self, *inputs, client, **kwargs):
+        await client.submit(self.run, *inputs)
+
+@bundleclass
+class Raw(Task):
+    branch: str
+    def output(self):
+        return rooted('raw', self.branch)
+
+    def done(self):
+        assert self.output().exists(), "Raw data must exist"
+        return True
+
+def alias(f):
+    name = f.__name__
+    @wraps(f)
+    def inner(*args, **kwargs):
+        return f(*args, **kwargs).alias(name)
+    return inner
+
+def ratio(a, b):
+    return (a / b).cast(pld.Float32)
+
+def ratio_short_lines():
+    text = pl.col('text')
+    line_lengths = text.str.split('\n').list.eval(pl.element().str.strip_chars().str.len_chars())
+    total = line_lengths.list.len()
+    empty = line_lengths.list.eval(pl.element() == 0).list.sum()
+    short = line_lengths.list.eval(pl.element() <= 30).list.sum()
+    return ratio(short - empty, total - empty)
+
+def ratio_alphanumeric():
+    text = pl.col('text')
+    alphanumeric = text.str.count_matches(r'\w')
+    total = text.str.len_chars()
+    return ratio(alphanumeric, total)
+
+def apply_signals(df, *functions):
+    return df.select(*[alias(f)() for f in functions])
+
+@bundleclass
+class QualitySignals(DaskTask):
     branch: str
 
     def requires(self):
-        return ExternalTask(target=rooted('raw', self.branch))
+        return Raw(branch=self.branch)
 
     def output(self):
-        return rooted('head', self.branch)
+        return rooted('signals', self.branch)
 
     def run(self, raw):
         with self.output().tmp_path() as path:
-            pl.scan_parquet(raw.file).head().sink_parquet(path)
+            df = pl.scan_parquet(raw.path)
+            out = apply_signals(df, ratio_short_lines, ratio_alphanumeric)
+            out.sink_parquet(path)
 
-    def cleanup(self):
-        self.output().path.unlink()
+@dataclass
+class Bound:
+    low: Any = None
+    high: Any = None
+    def __call__(self, x):
+        match self.low, self.high:
+            case (None, None):
+                return True
+            case (None, high):
+                return x <= high
+            case (low, None):
+                return low <= x
+            case (low, high):
+                return x.is_between(low, high)
 
-    async def run_async(self, raw, resources, client):
-        async with resources.wait_for_resources(head=1):
-            await client.submit(self.run, raw)
+FILTER = dict(
+    ratio_short_lines=Bound(high=0.3),
+    ratio_alphanumeric=Bound(low=0.8),
+)
+
+def mk_filter(**kwargs):
+    return reduce(lambda a, b: a & b, [f(pl.col(k)) for k, f in kwargs.items()])
+
 
 @bundleclass
-class LoadStuff(MemoryTask):
-    async def run_async(self, client, **kwargs):
-        fut = await client.submit(lambda: list(range(100)))
-        self.mem.set(fut)
-
-@bundleclass
-class PrintStuff(Task):
-    ix: int
-
-    def requires(self):
-        return LoadStuff()
-
-    def run(self, xs):
-        print('Print:', xs[self.ix])
-
-    async def run_async(self, mem, client, **kwargs):
-        result = await client.submit(self.run, mem.get())
-
-@bundleclass
-class Upper(TaskWithCleanup):
+class Filter(DaskTask):
     branch: str
 
     def requires(self):
-        return Head(branch=self.branch)
+        return Raw(branch=self.branch), QualitySignals(branch=self.branch)
 
     def output(self):
-        return rooted('upper', self.branch)
+        return rooted('filtered', self.branch)
 
-    def run(self, head):
+    def run(self, raw, signals):
         with self.output().tmp_path() as path:
-            pl.scan_parquet(head.file).select(pl.col('text').str.to_uppercase()).sink_parquet(path)
+            raw = pl.read_parquet(raw.path)
+            signals = pl.read_parquet(signals.path)
+            pl.concat([raw, signals], how='horizontal').filter(((pl.col('ratio_alphanumeric') >=.8) & (pl.col('ratio_short_lines') <= 0.1))).select(raw.columns).write_parquet(path)
 
-    def cleanup(self):
-        self.output().path.unlink()
 
-    async def run_async(self, head, resources, client):
-        async with resources.wait_for_resources(upper=2) as supply:
-            await supply.release(upper=1)
-            await client.submit(self.run, head)
-
-@bundleclass
-class Join(Task):
-    branch: str
-
-    def requires(self):
-        return Head(branch=self.branch), Upper(branch=self.branch)
-
-    def output(self):
-        return rooted('joined', self.branch)
-
-    def run(self, head, upper):
-        head = pl.scan_parquet(head.file)
-        upper = pl.scan_parquet(upper.file).select(pl.col('text').alias('upper'))
-
-        with self.output().tmp_path() as path:
-            pl.concat([head, upper], how='horizontal').collect().write_parquet(path)
-
-    async def run_async(self, head, upper, resources, client):
-        await client.submit(self.run, head, upper)
+# Runner
 
 async def run(dag):
     if dag:
         logging.info('Setting up cluster')
-        resources = await Resources.init(upper=3, head=5)
+        resources = await Resources.init(A=1, upper=3, head=5)
         async with LocalCluster(asynchronous=True) as cluster:
             async with Client(cluster, asynchronous=True) as client:
                 print(client.dashboard_link)
@@ -119,13 +141,9 @@ if __name__ == '__main__':
             datefmt='%Y-%m-%d %H:%M:%S',
             )
     rawdir = root / 'raw'
-    logging.info('Creating tasks')
     tasks = []
     for file in rawdir.rglob('*.parquet'):
-        tasks.append(Join(branch=str(file.relative_to(rawdir))))
-    tasks.append(PrintStuff(ix=2))
-    tasks.append(PrintStuff(ix=3))
-    tasks.append(PrintStuff(ix=84))
+        tasks.append(Filter(branch=str(file.relative_to(rawdir))))
     logging.info('Making DAG')
     dag = mk_dag(*tasks)
     asyncio.run(run(dag))

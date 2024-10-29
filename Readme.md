@@ -14,6 +14,9 @@ an executor (e.g. dask, submitit) that does the work remotely.
 It does not have luigis commandline functionality.
 - Waluigi only implements a small subset of luigi functionality. 
 
+As such it relies on an external *executor* to do the heavy lifting in terms of
+compute functionality.
+
 ## Tasks: `waluigi.task`
 
 Tasks are the things we wish to run. They are defined by the tasks they `require`, 
@@ -82,15 +85,30 @@ NoTarget is a target that never exists. It is mainly intended for debugging purp
 The runner is responsible for constructing the graph of task dependencies and create
 asyncio tasks that perform the actual work. The two main methods are `mk_dag` and `run_dag`. 
 
-`mk_dag` takes a lists of tasks and constructs a graph by iterating over tasks dependencies.
+`mk_dag` takes a lists of tasks and constructs a graph by iterating over tasks dependencies,
+adding dependencies and, if the dependency is not *done*, recursively adding its dependencies.
 This graph is then topologically sorted and tasks are returned along with their dependencies
 and dependents. 
 
 `run_dag` takes this dag and schedules all runs, along with cleanup methods, using asyncio.
 `run_dag` also takes arbitrary keyword arguments. These are sent to each tasks *run_async*
-method and used to supply the Tasks with remote executors, resource limitation, et.c. 
+method and used to supply the Tasks with remote executors, resource limitation, et.c.
 
-## Example:
+In case a task fails, all tasks that depend on it will also fail with a FailedDependency error.
+
+## Example
+
+The following example shows waluigi using a dask cluster to perform remote execution (with a
+shared filesystem). `DaskTask` is just a shallow wrapper around Task that wraps the `run` method
+so that it is run remotely on the dask cluster.
+`Raw` is a task that wraps a LocalTarget assumed to already exist, i.e. the raw input files.
+`QualitySignals` reads a raw input file and computes quality signals for each row.
+`Filtered` joins the raw data and corresponding quality signals and outputs a subset
+of rows matching some specified criteria.
+
+When submitting tasks, we only need to supply the Filter tasks. The tasks it depends on will
+be scheduled by the runner in `mk_dag`. Tasks that are already done (i.e. whose targets *exists*)
+are not run again.
 
 ```
 import os
@@ -103,17 +121,24 @@ from waluigi.runner import *
 from waluigi.task import *
 from waluigi.target import *
 
+@bundleclass
 class DaskTask(Task):
-    def run_async(*inputs, client=client, **kwargs):
-        await client.submit(self.run(*inputs))
+    def run_async(*inputs, client, **kwargs):
+        await client.submit(self.run, *inputs)
 
 root = 'path/to/data/folder'
 
-class Raw(External):
+@bundleclass
+class Raw(Task):
     branch: str
     def output(self):
         return LocalTarget(file=os.path.join(root, 'raw', self.branch))
 
+    def done(self):
+        assert self.output().exists(), "Raw data must exist!"
+        return True
+
+@bundleclass
 class QualitySignals(DaskTask):
     branch: str
     def requires(self):
@@ -124,9 +149,10 @@ class QualitySignals(DaskTask):
 
     def run(self, infile):
         with self.output().tmp_path() as path:
-            polars.read_parquet(infile).select(...).write_parquet(path)
+            polars.read_parquet(infile.path).select(...).write_parquet(path)
 
-class Filtered(DaskTask):
+@bundleclass
+class Filter(DaskTask):
     branch: str
     def requires(self):
         return Raw(branch=self.branch), QualitySignals(branch=self.branch)
@@ -141,15 +167,13 @@ class Filtered(DaskTask):
             joined = polars.concat([raw_df, signals_df]).select(...)
             joined.write_parquet(path)
 
-
-
 async def run(dag):
     async with LocalCluster(asynchronous=True) as cluster:
         async with Client(cluster, asynchronous=True) as client:
             await run_dag(dag, client=client)
 
 if __name__ == '__main__':
-    tasks = [Filtered(branch='xaa.parquet'), ...] # List of tasks we want to run
+    tasks = [Filter(branch='xaa.parquet'), ...] # List of tasks we want to run
     dag = mk_dag(*tasks)
     asyncio.run(run(dag))
 ```
