@@ -3,13 +3,18 @@ from waluigi.task import *
 from waluigi.graph import Graph, Left, Right
 from waluigi.errors import *
 from waluigi.bundle import *
+from waluigi.resources import *
 
 import copy
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import field
+from types import SimpleNamespace
 
 
+async def mk_context(resources={}, **kwargs):
+    r = await Resources.init(**resources)
+    return SimpleNamespace(resources=r, **kwargs)
 
 def add_task(graph: Graph, task: Task):
     """
@@ -47,7 +52,7 @@ def mk_dag(*tasks):
     assert leftmost == graph.leftmost.val
     return [(val, graph.get(val)) for val in sorted]
 
-async def run_dag(task_edges, **kwargs):
+async def run_dag(task_edges, context):
     """
     task_edges: [(Task, TaskInfo)]
     kwargs: keyword arguments passed to the run_async methods of the tasks.
@@ -67,14 +72,14 @@ async def run_dag(task_edges, **kwargs):
             done += 1
         else:
             deps = [runs[l] for l in edges.left]
-            runs[task] = asyncio.create_task(task._run_after(*deps, **kwargs))
+            runs[task] = asyncio.create_task(task._run_after(context, *deps))
 
     for (task, edges) in task_edges:
         if isinstance(task, TaskWithCleanup):
             deps = [runs[r] for r in edges.right]
             if not task.done():
                 deps += [runs[task]]
-            cleanups[task] = asyncio.create_task(task._cleanup_after(*deps, **kwargs))
+            cleanups[task] = asyncio.create_task(task._cleanup_after(context, *deps))
     
     logger.info('Tasks scheduled, starting run')
     results = await asyncio.gather(*runs.values(), *cleanups.values(), return_exceptions=True)
@@ -144,7 +149,7 @@ def log_results(done, run_results, clean_results):
     logger.info('~~~~~~~~~ good news ~~~~~~~~~~')
     logger.info(f'Already existing : {done}')
     logger.info(f'Run successes    : {runs - done} / {len(run_results) - done}')
-    logger.info(f'Clean suncceses  : {cleans} / {len(clean_results)}')
+    logger.info(f'Clean succeses   : {cleans} / {len(clean_results)}')
 
     if all_ok:
         logger.info('All tasks successfull! :)')

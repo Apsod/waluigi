@@ -52,7 +52,7 @@ class Resources:
     @classmethod
     async def init(cls, *args, **kwargs):
         """
-        Initiliazie the Resources. 
+        Initiliaze the Resources. 
         Can either be called with a counter or with kwargs:
         ```
         Resources.init(Counter(A=2, B=3))
@@ -95,10 +95,11 @@ class Resources:
         requirement = as_ctr(*args, **kwargs)
         if not (requirement <= self.total()):
             raise ResourceError(f"Requested incompatible resources: {requirement} </= {self.total()}")
-        async with self.cond:
-            await self.cond.wait_for(lambda: requirement <= self.available)
-            self.used += requirement
-            self.available -= requirement
+        if requirement: #If we request resources: wait, else, just pass the (empty) request
+            async with self.cond:
+                await self.cond.wait_for(lambda: requirement <= self.available)
+                self.used += requirement
+                self.available -= requirement
         return requirement
     
     @asynccontextmanager

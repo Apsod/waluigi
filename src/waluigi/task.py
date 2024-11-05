@@ -11,6 +11,7 @@ from waluigi.target import *
 from waluigi.errors import *
 
 import asyncio
+from copy import copy
 
 @bundleclass
 class Task(Bundle):
@@ -19,6 +20,15 @@ class Task(Bundle):
     To define a class, you need to define what other tasks it **requires**, 
     what it **output**s, and how to construct the output from the inputs.
     """    
+
+    def resources(self):
+        """
+        **resources** define the resources needed for this task. The task
+        will wait until resources are available.
+        Should return a dictionary of the type {resource_name: units}
+        By default returns an empty dictionary, i.e. no resources.
+        """
+        return {}
 
     def requires(self):
         """
@@ -82,7 +92,7 @@ class Task(Bundle):
         """
         return self.output().exists()
 
-    async def _run_after(self, *tasks, **kwargs):
+    async def _run_after(self, context, *tasks):
         """
         **_run_after**. Used by the scheduler.
         The task wait for the input tasks
@@ -95,7 +105,7 @@ class Task(Bundle):
         """
         if tasks:
             try:
-                logger.info(f'Run {self} waiting.')
+                logger.info(f'{self} awaiting dependencies.')
                 results = await asyncio.gather(*tasks)
             except Exception as e:
                 logger.exception('dependency failure:')
@@ -104,15 +114,19 @@ class Task(Bundle):
             results = []
         try:
             inputs = [x.output() for x in results]
-            logger.info(f'Run {self} entered.')
-            await self.run_async(*inputs, **kwargs)
-            logger.info(f'Run {self} done.')
+            logger.info(f'{self} awaiting allocation.')
+            async with context.resources.get_allocation(**self.resources()) as allocation:
+                inner_context = copy(context)
+                inner_context.allocation = allocation
+                logger.info(f'{self} run started.')
+                await self.run_async(inner_context, *inputs)
+                logger.info(f'Run {self} done.')
             return self
         except Exception as e:
             logger.exception('run failure:')
             raise FailedRun(self) from e
 
-    async def run_async(self, *inputs, **kwargs):
+    async def run_async(self, context, *inputs):
         """
         **run_async** is responsible for actually
         running the task.
@@ -157,7 +171,7 @@ class TaskWithCleanup(Task):
         """
         pass
 
-    async def _cleanup_after(self, *tasks, **kwargs):
+    async def _cleanup_after(self, context, *tasks):
         """
         **_cleanup_after**. Used by the scheduler.
         The cleanup waits for all tasks that depend
@@ -175,13 +189,13 @@ class TaskWithCleanup(Task):
                 raise FailedDependency(self) from e
         try:
             logger.info(f'Cleanup {self} entered.')
-            await self.cleanup_async(**kwargs)
+            await self.cleanup_async(context)
             logger.info(f'Cleanup {self} done.')
             return self
         except Exception as e:
             raise FailedRun(self) from e
 
-    async def cleanup_async(self, **kwargs):
+    async def cleanup_async(self, context):
         """
         **cleanup_async** is responsible for actually
         performing the cleanup.

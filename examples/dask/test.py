@@ -2,8 +2,8 @@ from dataclasses import field, dataclass
 from typing import Any
 import asyncio
 import logging
-from functools import wraps
-from contextlib import contextmanager
+from functools import wraps, reduce
+from contextlib import contextmanager, asynccontextmanager
 import pathlib
 
 from dask.distributed import LocalCluster, Client
@@ -13,18 +13,28 @@ import polars.datatypes as pld
 from waluigi.bundle import bundleclass
 from waluigi.task import Task, TaskWithCleanup, ExternalTask, MemoryTask
 from waluigi.runner import mk_dag, run_dag
+import waluigi.runner as runner
 from waluigi.target import *
 from waluigi.resources import Resources
 
 root = pathlib.Path('data')
+
+@asynccontextmanager
+async def mk_context(**kwargs):
+    async with LocalCluster(asynchronous=True) as cluster:
+        async with Client(cluster, asynchronous=True) as client:
+            context = await runner.mk_context(resources=kwargs, client=client)
+            yield context
+
+
 
 def rooted(*branch):
     return LocalTarget(file=str(root.joinpath(*branch)))
 
 @bundleclass
 class DaskTask(Task):
-    async def run_async(self, *inputs, client, **kwargs):
-        await client.submit(self.run, *inputs)
+    async def run_async(self, context, *inputs):
+        await context.client.submit(self.run, *inputs)
 
 @bundleclass
 class Raw(Task):
@@ -63,9 +73,16 @@ def ratio_alphanumeric():
 def apply_signals(df, *functions):
     return df.select(*[alias(f)() for f in functions])
 
+def mk_signals(*functions):
+    return [alias(f)() for f in functions]
+
+
 @bundleclass
 class QualitySignals(DaskTask):
     branch: str
+
+    def resources(self):
+        return {'A': 1}
 
     def requires(self):
         return Raw(branch=self.branch)
@@ -76,7 +93,7 @@ class QualitySignals(DaskTask):
     def run(self, raw):
         with self.output().tmp_path() as path:
             df = pl.scan_parquet(raw.path)
-            out = apply_signals(df, ratio_short_lines, ratio_alphanumeric)
+            out = df.select(pl.col('id'), *mk_signals(ratio_short_lines, ratio_alphanumeric))
             out.sink_parquet(path)
 
 @dataclass
@@ -102,10 +119,12 @@ FILTER = dict(
 def mk_filter(**kwargs):
     return reduce(lambda a, b: a & b, [f(pl.col(k)) for k, f in kwargs.items()])
 
-
 @bundleclass
 class Filter(DaskTask):
     branch: str
+
+    def resources(self):
+        return {'A': 1}
 
     def requires(self):
         return Raw(branch=self.branch), QualitySignals(branch=self.branch)
@@ -116,21 +135,18 @@ class Filter(DaskTask):
     def run(self, raw, signals):
         with self.output().tmp_path() as path:
             raw = pl.read_parquet(raw.path)
-            signals = pl.read_parquet(signals.path)
-            pl.concat([raw, signals], how='horizontal').filter(((pl.col('ratio_alphanumeric') >=.8) & (pl.col('ratio_short_lines') <= 0.1))).select(raw.columns).write_parquet(path)
-
+            signals = pl.read_parquet(signals.path).rename({'id': 'signal_id'})
+            merged = pl.concat([raw, signals], how='horizontal')
+            assert merged.select((pl.col('id') == pl.col('signal_id')).all()).item()
+            merged.filter(mk_filter(**FILTER)).select(raw.columns).write_parquet(path)
 
 # Runner
 
 async def run(dag):
     if dag:
         logging.info('Setting up cluster')
-        resources = await Resources.init(A=1, upper=3, head=5)
-        async with LocalCluster(asynchronous=True) as cluster:
-            async with Client(cluster, asynchronous=True) as client:
-                print(client.dashboard_link)
-                await run_dag(dag, resources=resources, client=client)
-                await asyncio.sleep(5)
+        async with mk_context(A=2) as context:
+            await run_dag(dag, context)
     else:
         logging.info('DAG empty: No tasks scheduled')
 
