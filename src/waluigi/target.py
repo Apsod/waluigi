@@ -120,7 +120,7 @@ class LocalTarget(Target):
         If writing, the handle points to a temporary file
         that is moved to self.file on exit (see LocalTarget.tmp_path)
         """
-        if model.startswith('r'):
+        if mode.startswith('r'):
             path_context = nullcontext(self.path)
         elif mode.startswith('w'):
             path_context = self.tmp_path()

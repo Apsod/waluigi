@@ -71,7 +71,7 @@ async def run_dag(task_edges, context):
             runs[task] = asyncio.create_task(task.noop())
             done += 1
         else:
-            deps = [runs[l] for l in edges.left]
+            deps = [runs[l] for l in task._requires()]#edges.left]
             runs[task] = asyncio.create_task(task._run_after(context, *deps))
 
     for (task, edges) in task_edges:
@@ -134,7 +134,7 @@ def log_results(done, run_results, clean_results):
         for fail in clean_fails:
             try:
                 raise fail
-            except FailedCleanup as e:
+            except FailedRun as e:
                 logger.exception('cleanup failure')
         
     logger.info('======== RUN STATUS ==========')

@@ -1,4 +1,3 @@
-
 class FailedRun(Exception):
     pass
 
