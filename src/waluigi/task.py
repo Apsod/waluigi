@@ -1,17 +1,12 @@
-from dataclasses import dataclass
-from functools import partial, wraps
-import json
-import random
-from dataclasses import *
+import asyncio
+import copy
+from dataclasses import field
 
 from waluigi import logger
-from waluigi.graph import *
-from waluigi.bundle import *
-from waluigi.target import * 
-from waluigi.errors import *
+from waluigi.bundle import Bundle, bundleclass
+from waluigi.errors import FailedDependency, FailedRun
+from waluigi.target import MemoryTarget, NoTarget, Target
 
-import asyncio
-from copy import copy
 
 @bundleclass
 class Task(Bundle):
@@ -34,7 +29,8 @@ class Task(Bundle):
         """
         **requires** define the "input" tasks that this task depend on.
         The tasks **output** targets will be fed to the run_async
-        method.
+        method in the same order returned here. This order is frozen
+        when the DAG is constructed.
         """
         return []
 
@@ -69,7 +65,8 @@ class Task(Bundle):
         is not needed if the task implements run_async.
 
         By default, inputs is the output targets of
-        the tasks this task depends on.
+        the tasks this task depends on, in the order
+        returned by **requires** when the DAG was built.
 
         Note that if run_async is not implemented,
         this will be run by the single-threaded scheduler,
@@ -98,7 +95,7 @@ class Task(Bundle):
         The task wait for the input tasks
         to finish. When all input tasks
         are done, their output targets are
-        passed as inputs to run_async. 
+        passed as inputs to run_async in DAG order.
             
         All kwargs passed to the scheduler are
         passed to run_async.
@@ -115,8 +112,10 @@ class Task(Bundle):
         try:
             inputs = [x.output() for x in results]
             logger.info(f'{self} awaiting allocation.')
-            async with context.resources.get_allocation(**self.resources()) as allocation:
-                inner_context = copy(context)
+            async with context.resources.get_allocation(
+                **self.resources()
+            ) as allocation:
+                inner_context = copy.copy(context)
                 inner_context.allocation = allocation
                 logger.info(f'{self} run started.')
                 await self.run_async(inner_context, *inputs)
@@ -131,7 +130,9 @@ class Task(Bundle):
         **run_async** is responsible for actually
         running the task.
 
-        inputs: The output targets of the input tasks.
+        inputs: The output targets of the input tasks, in
+        the same order returned by **requires** when the
+        DAG was constructed.
         kwargs: keyword arguments passed to the scheduler.
 
         By default this method just calls run with
@@ -230,7 +231,7 @@ class ExternalTask(Task):
         For external tasks, this should always return true.
         """
         is_done = self.output().exists()
-        assert is_done, f"External target does not exist: {target}"
+        assert is_done, f"External target does not exist: {self.output()}"
         return True
 
 @bundleclass

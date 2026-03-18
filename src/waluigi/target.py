@@ -1,9 +1,10 @@
+from contextlib import contextmanager, nullcontext
+from dataclasses import field
 from pathlib import Path
 from uuid import uuid4
-from contextlib import contextmanager, nullcontext
-from waluigi.bundle import *
-from waluigi import logger
-from dataclasses import field
+
+from waluigi.bundle import Bundle, bundleclass
+
 
 @bundleclass
 class Target(Bundle):
@@ -21,7 +22,7 @@ class Target(Bundle):
         when scheduling tasks. The output targets of 
         finished tasks are assumed to exist.
         """
-        pass
+        raise NotImplementedError
 
 @bundleclass
 class NoTarget(Target):
@@ -49,7 +50,9 @@ class Wrapped(object):
         try:
             return self.val
         except AttributeError:
-            raise AttributeError('Trying to get wrapped object without setting it first')
+            raise AttributeError(
+                'Trying to get wrapped object without setting it first'
+            )
 
     def delete(self):
         try:

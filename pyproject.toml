@@ -11,3 +11,13 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"test/test_cycles.py" = ["E402"]

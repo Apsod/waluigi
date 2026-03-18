@@ -1,12 +1,9 @@
-import copy
-
+from asyncio import Condition
 from collections import Counter
 from contextlib import asynccontextmanager
-from asyncio import Condition
 from dataclasses import dataclass
 
-from waluigi import logger
-from waluigi.errors import *
+from waluigi.errors import ResourceError
 
 
 def as_ctr(*args, **kwargs):
@@ -76,7 +73,9 @@ class Resources:
         """
         resources = as_ctr(*args, **kwargs)
         if not (resources <= self.used):
-            raise ResourceError('Returning resources not in use: {resources} </= {self.used}')
+            raise ResourceError(
+                'Returning resources not in use: {resources} </= {self.used}'
+            )
         if resources:
             self.used -= resources
             self.available += resources
@@ -94,8 +93,10 @@ class Resources:
     async def request_resources(self, *args, **kwargs):
         requirement = as_ctr(*args, **kwargs)
         if not (requirement <= self.total()):
-            raise ResourceError(f"Requested incompatible resources: {requirement} </= {self.total()}")
-        if requirement: #If we request resources: wait, else, just pass the (empty) request
+            raise ResourceError(
+                f"Requested incompatible resources: {requirement} </= {self.total()}"
+            )
+        if requirement:
             async with self.cond:
                 await self.cond.wait_for(lambda: requirement <= self.available)
                 self.used += requirement
@@ -109,7 +110,7 @@ class Resources:
         can be used to release partial resources or request more.
         Releases all allocated resources back to the supply on exit.
 
-        Raises ResourceError if requested resources <= total resources.
+        Raises ResourceError if requested resources </= total resources.
         """
         requirement = await self.request_resources(*args, **kwargs)
         allocation = Allocation(requirement, self)

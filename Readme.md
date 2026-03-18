@@ -23,13 +23,17 @@ Tasks are the things we wish to run. They are defined by the tasks they `require
 and the target they `output`. To actually output anything of value they also need 
 to implement a *run_async* or *run* method that materializes the output.
 
+The order returned by `requires()` matters: downstream `run` and `run_async`
+methods receive inputs in that same order, and that order is frozen when the DAG
+is built.
+
 ```
 @bundleclass
 class UpperCase(Task):
     file: str
 
     def requires(self):
-        return External(target=LocalTarget(self.file))
+        return ExternalTask(target=LocalTarget(file=self.file))
 
     def output(self):
         return LocalTarget(f'{self.file}_uppercased')
@@ -88,15 +92,19 @@ asyncio tasks that perform the actual work. The two main methods are `mk_dag` an
 `mk_dag` takes a lists of tasks and constructs a graph by iterating over tasks dependencies,
 adding dependencies and, if the dependency is not *done*, recursively adding its dependencies.
 This graph is then topologically sorted and tasks are returned along with their dependencies
-and dependents. 
+and dependents. Dependency order is preserved from each task's `requires()` method.
 
-`run_dag` takes this dag and schedules all runs, along with cleanup methods, using asyncio.
-`run_dag` also takes arbitrary keyword arguments. These are sent to each tasks *run_async*
-method and used to supply the Tasks with remote executors, resource limitation, et.c.
+`run_dag` takes this dag and a scheduler context, and schedules all runs, along with cleanup
+methods, using asyncio. The context is usually created with `mk_context`, and can carry shared
+objects such as remote executors and resource limits that are then available to each task's
+`run_async` method.
 
 In case a task fails, all tasks that depend on it will also fail with a FailedDependency error.
 
 ## Example
+
+For a minimal local example with only Polars as an extra dependency, see
+`examples/polars_pipeline.py`.
 
 The following example shows waluigi using a dask cluster to perform remote execution (with a
 shared filesystem). `DaskTask` is just a shallow wrapper around Task that wraps the `run` method
@@ -123,8 +131,8 @@ from waluigi.target import *
 
 @bundleclass
 class DaskTask(Task):
-    def run_async(*inputs, client, **kwargs):
-        await client.submit(self.run, *inputs)
+    async def run_async(self, context, *inputs):
+        await context.client.submit(self.run, *inputs)
 
 root = 'path/to/data/folder'
 
@@ -170,10 +178,19 @@ class Filter(DaskTask):
 async def run(dag):
     async with LocalCluster(asynchronous=True) as cluster:
         async with Client(cluster, asynchronous=True) as client:
-            await run_dag(dag, client=client)
+            context = await mk_context(client=client)
+            await run_dag(dag, context)
 
 if __name__ == '__main__':
     tasks = [Filter(branch='xaa.parquet'), ...] # List of tasks we want to run
     dag = mk_dag(*tasks)
     asyncio.run(run(dag))
+```
+
+## Tests
+
+Run the regression suite with:
+
+```
+uv run python -m unittest discover -s test -v
 ```

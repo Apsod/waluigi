@@ -1,15 +1,11 @@
-from waluigi import logger
-from waluigi.task import *
-from waluigi.graph import Graph, Left, Right
-from waluigi.errors import *
-from waluigi.bundle import *
-from waluigi.resources import *
-
-import copy
 import asyncio
-from contextlib import asynccontextmanager
-from dataclasses import field
 from types import SimpleNamespace
+
+from waluigi import logger
+from waluigi.errors import FailedDependency, FailedRun
+from waluigi.graph import Graph
+from waluigi.resources import Resources
+from waluigi.task import Task, TaskWithCleanup
 
 
 async def mk_context(resources={}, **kwargs):
@@ -26,9 +22,10 @@ def add_task(graph: Graph, task: Task):
     """
     def inner(parent):
         for child in parent._requires():
-            if not (child.done() or graph.has(child)):
-                inner(child)
+            recurse = not (child.done() or graph.has(child))
             graph.add(child, parent)
+            if recurse:
+                inner(child)
 
     if not (task.done() or graph.has(task)):
         inner(task)
@@ -42,7 +39,9 @@ def mk_dag(*tasks):
     Returns a list in topological order of type
     [(Task, TaskInfo)], where TaskInfo contains
     dependents and dependencies of the task in 
-    question.
+    question. The dependency order in TaskInfo.left
+    is the order returned by each task's requires()
+    when the DAG was constructed.
     """
     graph = Graph()
     for task in tasks:
@@ -71,7 +70,7 @@ async def run_dag(task_edges, context):
             runs[task] = asyncio.create_task(task.noop())
             done += 1
         else:
-            deps = [runs[l] for l in task._requires()]#edges.left]
+            deps = [runs[l] for l in edges.left]
             runs[task] = asyncio.create_task(task._run_after(context, *deps))
 
     for (task, edges) in task_edges:
@@ -82,8 +81,13 @@ async def run_dag(task_edges, context):
             cleanups[task] = asyncio.create_task(task._cleanup_after(context, *deps))
     
     logger.info('Tasks scheduled, starting run')
-    results = await asyncio.gather(*runs.values(), *cleanups.values(), return_exceptions=True)
-    run_results, clean_results = results[:len(runs.values())], results[len(runs.values()):]
+    results = await asyncio.gather(
+        *runs.values(),
+        *cleanups.values(),
+        return_exceptions=True,
+    )
+    run_results = results[: len(runs.values())]
+    clean_results = results[len(runs.values()) :]
     log_results(done, run_results, clean_results)
 
 def log_results(done, run_results, clean_results):
@@ -126,7 +130,7 @@ def log_results(done, run_results, clean_results):
         for fail in run_fails:
             try:
                 raise fail
-            except FailedRun as e:
+            except FailedRun:
                 logger.exception('run failure')
 
     if clean_fails:
@@ -134,7 +138,7 @@ def log_results(done, run_results, clean_results):
         for fail in clean_fails:
             try:
                 raise fail
-            except FailedRun as e:
+            except FailedRun:
                 logger.exception('cleanup failure')
         
     logger.info('======== RUN STATUS ==========')

@@ -1,13 +1,46 @@
+import copy
 from collections import defaultdict
+from collections.abc import MutableSet
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, TypeVar
 from unittest.mock import sentinel
 
+T = TypeVar('T')
 
-import concurrent.futures as futures
-import asyncio
 
-import copy
+class OrderedSet(MutableSet[T], Generic[T]):
+    def __init__(self, iterable=()):
+        self._data = dict.fromkeys(iterable)
+
+    def __contains__(self, value: object) -> bool:
+        return value in self._data
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def add(self, value: T) -> None:
+        self._data[value] = None
+
+    def discard(self, value: T) -> None:
+        self._data.pop(value, None)
+
+    def pop(self) -> T:
+        if not self._data:
+            raise KeyError
+        return self._data.popitem()[0]
+
+    def copy(self):
+        return OrderedSet(self._data)
+
+    def __copy__(self):
+        return self.copy()
+
+    def __repr__(self):
+        return f"OrderedSet({list(self._data)!r})"
+
 
 @dataclass(frozen=True, eq=True)
 class Directed:
@@ -46,10 +79,14 @@ class Right(Directed):
 @dataclass(frozen=True, eq=True)
 class NodeInfo:
     """
-    Bundle of edges (and their directions).
+    Bundle of neighbors for a node.
+
+    `left` and `right` preserve the insertion order from graph construction.
+    For task DAGs, that means `left` preserves the dependency order returned by
+    `requires()`.
     """
-    left: {Any}
-    right: {Any}
+    left: OrderedSet[Any]
+    right: OrderedSet[Any]
 
 class Graph(object):
     """
@@ -62,7 +99,7 @@ class Graph(object):
         """
         Initialize an empty graph.
         """
-        self.edges = defaultdict(set)
+        self.edges = defaultdict(OrderedSet)
         self.leftmost = Left(sentinel.leftmost)
         self.rightmost = Right(sentinel.rightmost)
         self._add(self.leftmost, self.rightmost)
@@ -133,13 +170,17 @@ class Graph(object):
         ```
         """
         if Right(node) in self.edges:
-            left = {x for x in self.edges[Right(node)] if x != self.leftmost.val}
+            left = OrderedSet(
+                x for x in self.edges[Right(node)] if x != self.leftmost.val
+            )
         else:
-            left = {}
+            left = OrderedSet()
         if Left(node) in self.edges:
-            right = {x for x in self.edges[Left(node)] if x != self.rightmost.val}
+            right = OrderedSet(
+                x for x in self.edges[Left(node)] if x != self.rightmost.val
+            )
         else:
-            right = {}
+            right = OrderedSet()
         return NodeInfo(
                 left = left,
                 right = right,
@@ -224,7 +265,7 @@ class Graph(object):
         while True:
             new_roots = set()
             for child in graph.pops(direction(n)):
-                if not direction.opposite(child) in graph.edges:
+                if direction.opposite(child) not in graph.edges:
                     new_roots.add(child)
             n = yield new_roots
 

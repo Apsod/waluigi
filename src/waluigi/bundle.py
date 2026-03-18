@@ -1,14 +1,18 @@
-from dataclasses import dataclass, asdict, fields
+import json
+from dataclasses import dataclass, fields
 from functools import partial
 from pydoc import locate
-import json
 
 bundleclass = partial(dataclass, frozen=True, eq=True, kw_only=True)
 
 PREFIX = '__bundle_class.'
 
 def from_dict(value):
-    if isinstance(value, dict) and len(value) == 1 and list(value)[0].startswith(PREFIX):
+    if (
+        isinstance(value, dict)
+        and len(value) == 1
+        and list(value)[0].startswith(PREFIX)
+    ):
         (key, val), = value.items()
         clspath = key[len(PREFIX):]
         return locate(clspath)(**{k: from_dict(v) for k, v in val.items()})
